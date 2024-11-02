@@ -1,0 +1,27 @@
+bot:
+  command_prefix: ">"
+  description: "A Discord bot powered by Claude 3.5 Sonnet"
+  status_message: "Ready to chat!"
+  color_theme: 0xda7756
+
+claude:
+  model: "claude-3-sonnet-20240229"
+  max_tokens: 4096
+  temperature: 0.7
+  max_memory: 20
+  system_prompt: |
+    You are a helpful AI assistant. You provide clear, accurate, and engaging responses 
+    while maintaining a friendly tone. When dealing with technical topics, you explain 
+    concepts thoroughly but accessibly.
+
+database:
+  path: "data/conversations.db"
+  backup_interval: 86400  # 24 hours
+  max_attachment_size: 100000000  # 100MB
+  cleanup_interval: 604800  # 7 days
+
+limits:
+  max_conversation_length: 50
+  rate_limit: 5  # messages per second
+  max_tokens_per_request: 4096
+  max_image_size: 20000000  # 20MB 

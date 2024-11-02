@@ -1,45 +1,38 @@
-# claudecord
+# ClaudeCord
 
-a simple claude 3.5 sonnet discord bot to centralize access to claude among people in your discord server!
-<br>
-<br>
-<div align="center">
-  <img src="https://github.com/0xm00n/claudecord/assets/71098497/6af71484-ab86-42eb-b53c-15bce9a40d08" width="650">
-</div>
-<br>
+A powerful Discord bot powered by Claude 3.5 Sonnet with advanced features and management capabilities.
 
-## installation
-create a .env file in repo dir:<br>
-```
-touch .env
-```
-in the .env file, input your discord bot token and anthropic api key:<br>
-```
-DISCORD_TOKEN=<INSERT TOKEN>
-ANTHROPIC_API_KEY=<INSERT API KEY>
-```
-install requirements:<br>
-```
-pip install -r requirements.txt
-```
-run the bot:<br>
-```
-python main.py
-```
-i recommend running the bot on a server.
-<br>
-<br>
+## Detailed Setup Guide
 
-## current capabilities
+### Prerequisites
+- Python 3.10 or higher
+- pip (Python package manager)
+- Git
+- A Discord account with developer access
+- An Anthropic API key
 
-- [X] conversation history (stored in sqlite db) allowing for multi-turn conversations w/ claudecord for each user in server
-- [X] multimodality - claudecord can read and analyze pdfs and images 
-- [X] delete history command to have a fresh conversation memory `>delete_history`
+### Step 1: Discord Bot Setup
+1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
+2. Click "New Application" and name your bot
+3. Go to the "Bot" section
+4. Click "Add Bot"
+5. Enable these Privileged Gateway Intents:
+   - Presence Intent
+   - Server Members Intent
+   - Message Content Intent
+6. Copy your bot token (you'll need this later)
+7. Go to OAuth2 > URL Generator
+8. Select these scopes:
+   - bot
+   - applications.commands
+9. Select these bot permissions:
+   - Read Messages/View Channels
+   - Send Messages
+   - Embed Links
+   - Attach Files
+   - Read Message History
+   - Add Reactions
+10. Copy the generated URL and use it to invite the bot to your server
 
-
-## todo
-
-- [ ] incorporating citations into claudecord's responses 
-- [ ] implementing RAG
-- [ ] group chat command - merge conversation histories w/ 2 or more users in server
-- [ ] increase speed (im lazy)
+### Step 2: Local Setup
+1. Clone the repository:
