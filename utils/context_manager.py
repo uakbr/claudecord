@@ -158,6 +158,7 @@ class ContextManager:
         self.active_contexts: Dict[str, ConversationContext] = {}
         self.context_locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._cleanup_task: Optional[asyncio.Task] = None
+        self._lock = asyncio.Lock()
         
     async def start(self):
         """Start periodic cleanup"""
@@ -201,7 +202,7 @@ class ContextManager:
     
     async def save_context(self, user_id: str) -> None:
         """Save context to storage with error handling"""
-        async with self.context_locks[user_id]:
+        async with self._lock:
             if user_id in self.active_contexts:
                 try:
                     context_data = self.active_contexts[user_id].to_dict()

@@ -187,3 +187,20 @@ class ConversationStorage:
             ) as cursor:
                 async for row in cursor:
                     yield row[0], row[1]
+
+    async def cleanup_old_data(self):
+        """Periodically cleanup old data"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Delete old attachments
+            await db.execute("""
+                DELETE FROM attachments 
+                WHERE created_at < datetime('now', '-7 days')
+            """)
+            
+            # Delete old contexts
+            await db.execute("""
+                DELETE FROM user_contexts 
+                WHERE updated_at < datetime('now', '-30 days')
+            """)
+            
+            await db.commit()

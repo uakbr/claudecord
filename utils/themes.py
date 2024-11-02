@@ -55,6 +55,7 @@ class ThemeManager:
     
     def __init__(self):
         self.user_themes = {}
+        self.valid_colors = range(0x000000, 0xFFFFFF + 1)
         
     def set_user_theme(self, user_id: str, theme: Theme) -> None:
         """Set user's theme preference"""
@@ -88,6 +89,12 @@ class ThemeManager:
         except KeyError:
             return None
             
+    def validate_theme_colors(self, colors: ThemeColors) -> bool:
+        return all(
+            color in self.valid_colors
+            for color in [colors.primary, colors.secondary, colors.text]
+        )
+        
     def cleanup(self) -> None:
         """Cleanup resources"""
         self.user_themes.clear()

@@ -26,6 +26,7 @@ from utils.components import InteractiveView, ConfirmationView, PaginationView, 
 from utils.context_manager import ContextManager
 from utils.embed_manager import EmbedManager, FormatStyle
 from utils.monitoring import MonitoringSystem
+from utils.input_sanitizer import InputSanitizer
 
 # logging setup
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -93,6 +94,7 @@ class ClaudeCordBot:
         self.permissions = PermissionManager(self.env.admin_role, self.env.mod_role)
         self.bot.on_command_error = self.handle_error
         self.monitoring = MonitoringSystem()
+        self.sanitizer = InputSanitizer()
 
     def _validate_env(self) -> EnvConfig:
         """Validate and load environment variables"""
@@ -170,6 +172,17 @@ class ClaudeCordBot:
             section, key = path.split('.')
             if not validator(config[section][key]):
                 raise ConfigurationError(f"Invalid value for {path}: {config[section][key]}")
+
+        # Add validation for new config sections
+        if 'database' not in config:
+            raise ConfigurationError("Missing database configuration")
+        
+        # Validate database config
+        db_config = config['database']
+        required_db_fields = ['path', 'backup_interval', 'max_attachment_size']
+        for field in required_db_fields:
+            if field not in db_config:
+                raise ConfigurationError(f"Missing required database config: {field}")
 
     def _backup_config(self, config: dict) -> None:
         """Create a backup of the current config"""
@@ -469,63 +482,72 @@ class ClaudeCordBot:
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     async def get_claude_response(self, user_id: str, content: List[Dict[str, any]]) -> str:
-        try:
-            conversation = await self.storage.get_convo(user_id)
-            
-            # Implement smarter conversation pruning
-            total_tokens = 0
-            pruned_conversation = []
-            
-            for msg in reversed(conversation):
-                estimated_tokens = len(str(msg).encode('utf-8')) // 4  # rough estimate
-                if total_tokens + estimated_tokens <= self.config['max_tokens'] * 0.75:  # Leave room for response
-                    pruned_conversation.insert(0, msg)
-                    total_tokens += estimated_tokens
-                else:
-                    break
-            
-            # process attachment references
-            for item in content:
-                if item['type'] == 'image' and item['source']['type'] == 'attachment_ref':
-                    attachment_id = item['source']['attachment_id']
-                    filename, content = await self.storage.get_attachment(attachment_id)
-                    item['source'] = {"type": "base64", "media_type": "image/png", "data": content}
-            
-            # add the new content to the conversation
-            conversation.append({"role": "user", "content": content})
-            
-            # trim the conversation if it's too long
-            if len(conversation) > self.config['max_memory']:
-                conversation = conversation[-(self.config['max_memory'] - (self.config['max_memory'] % 2)):]
-            
-            msg = await self.claude_client.messages.create(
-                model=self.config['model'],
-                max_tokens=self.config['max_tokens'],
-                temperature=self.config['temperature'],
-                system=self.config['system_prompt'],
-                messages=conversation
-            )
-            
-            assistant_response = msg.content[0].text
-            
-            # Add error handling for response validation
-            if not assistant_response or len(assistant_response) < 1:
-                raise ValueError("Empty response from Claude")
-            
-            # add Claude's response to the conversation
-            conversation.append({"role": "assistant", "content": assistant_response})
-            
-            # update the entire conversation in the database
-            await self.storage.update_convo(user_id, conversation)
-            
-            logger.debug(f"Processed message for user {user_id}")
-            logger.debug(f"Conversation history: {conversation}")
-            return assistant_response
-        except Exception as e:
-            logger.error(f"Error in get_claude_response: {e}")
-            if "rate limit" in str(e).lower():
-                raise RateLimitError("Rate limit exceeded")
-            raise
+        # Add validation for content structure
+        if not isinstance(content, list) or not all(isinstance(item, dict) for item in content):
+            raise ValueError("Invalid content format")
+        
+        # Add timeout handling
+        async with asyncio.timeout(30):  # 30 second timeout
+            try:
+                conversation = await self.storage.get_convo(user_id)
+                
+                # Implement smarter conversation pruning
+                total_tokens = 0
+                pruned_conversation = []
+                
+                for msg in reversed(conversation):
+                    estimated_tokens = len(str(msg).encode('utf-8')) // 4  # rough estimate
+                    if total_tokens + estimated_tokens <= self.config['max_tokens'] * 0.75:  # Leave room for response
+                        pruned_conversation.insert(0, msg)
+                        total_tokens += estimated_tokens
+                    else:
+                        break
+                
+                # process attachment references
+                for item in content:
+                    if item['type'] == 'image' and item['source']['type'] == 'attachment_ref':
+                        attachment_id = item['source']['attachment_id']
+                        filename, content = await self.storage.get_attachment(attachment_id)
+                        item['source'] = {"type": "base64", "media_type": "image/png", "data": content}
+                
+                # add the new content to the conversation
+                conversation.append({"role": "user", "content": content})
+                
+                # trim the conversation if it's too long
+                if len(conversation) > self.config['max_memory']:
+                    conversation = conversation[-(self.config['max_memory'] - (self.config['max_memory'] % 2)):]
+                
+                msg = await self.claude_client.messages.create(
+                    model=self.config['model'],
+                    max_tokens=self.config['max_tokens'],
+                    temperature=self.config['temperature'],
+                    system=self.config['system_prompt'],
+                    messages=conversation
+                )
+                
+                assistant_response = msg.content[0].text
+                
+                # Add error handling for response validation
+                if not assistant_response or len(assistant_response) < 1:
+                    raise ValueError("Empty response from Claude")
+                
+                # add Claude's response to the conversation
+                conversation.append({"role": "assistant", "content": assistant_response})
+                
+                # update the entire conversation in the database
+                await self.storage.update_convo(user_id, conversation)
+                
+                logger.debug(f"Processed message for user {user_id}")
+                logger.debug(f"Conversation history: {conversation}")
+                return assistant_response
+            except asyncio.TimeoutError:
+                logger.error("Claude API request timed out")
+                raise
+            except Exception as e:
+                logger.error(f"Error in get_claude_response: {e}")
+                if "rate limit" in str(e).lower():
+                    raise RateLimitError("Rate limit exceeded")
+                raise
 
     async def validate_content(self, content: List[Dict[str, any]]) -> bool:
         """Validate content before sending to Claude"""
@@ -711,6 +733,14 @@ class ClaudeCordBot:
     async def cleanup_resources(self):
         """Cleanup all bot resources"""
         try:
+            # Add database connection pool cleanup
+            if hasattr(self, 'db_pool'):
+                await self.db_pool.close()
+                
+            # Add explicit cleanup of message queue
+            if hasattr(self, 'message_queue'):
+                await self.message_queue.stop()
+                
             # Stop monitoring
             await self.monitoring.stop_monitoring()
             
@@ -730,6 +760,10 @@ class ClaudeCordBot:
             for task in asyncio.all_tasks():
                 if task is not asyncio.current_task():
                     task.cancel()
+
+    async def process_message(self, message: discord.Message):
+        # Sanitize user input
+        content = self.sanitizer.clean_content(message.content)
 
 if __name__ == '__main__':
     bot = ClaudeCordBot()

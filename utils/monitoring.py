@@ -62,6 +62,8 @@ class MonitoringSystem:
             "rate_limits": True
         }
         self._monitor_task: Optional[asyncio.Task] = None
+        self.api_latency = []
+        self.message_processing_times = []
         
     async def start_monitoring(self):
         """Start the monitoring system"""
@@ -254,3 +256,8 @@ class MonitoringSystem:
                 }
             }
         } 
+    
+    async def record_api_latency(self, latency: float):
+        self.api_latency.append(latency)
+        if len(self.api_latency) > 1000:
+            self.api_latency = self.api_latency[-1000:]
