@@ -1,5 +1,5 @@
 import discord
-from discord import Intents, Message, Embed
+from discord import Intents, Message, Embed, Activity, ActivityType, Status
 from discord.ext import commands
 from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
@@ -95,6 +95,15 @@ class ClaudeCordBot:
         self.bot.on_command_error = self.handle_error
         self.monitoring = MonitoringSystem()
         self.sanitizer = InputSanitizer()
+        self.status_index = 0
+        self.status_messages = [
+            ("with neural networks 🧠", ActivityType.playing),
+            ("your conversations 💭", ActivityType.watching),
+            ("to your requests 👂", ActivityType.listening),
+            ("Claude 3.5 Sonnet 🤖", ActivityType.competing),
+            ("Need help? Mention me! ✨", ActivityType.custom),
+        ]
+        self._status_task = None
 
     def _validate_env(self) -> EnvConfig:
         """Validate and load environment variables"""
@@ -607,10 +616,33 @@ class ClaudeCordBot:
             logger.error(f"An error occurred in send_msg: {e}", exc_info=True)
             await msg.channel.send("I'm sorry, I encountered an error while processing your request.")
 
+    async def _rotate_status(self):
+        """Rotate through different status messages"""
+        while True:
+            message, activity_type = self.status_messages[self.status_index]
+            activity = Activity(type=activity_type, name=message)
+            await self.bot.change_presence(activity=activity, status=Status.online)
+            
+            self.status_index = (self.status_index + 1) % len(self.status_messages)
+            await asyncio.sleep(60)  # Change status every minute
+
     @commands.Cog.listener()
     async def on_ready(self) -> None:
         logger.info(f'{self.bot.user} is now running...')
         await self.storage.init()
+        
+        # Start status rotation
+        self._status_task = asyncio.create_task(self._rotate_status())
+        
+        # Add cool startup message with ASCII art
+        ascii_art = """
+        ╔═══════════════════════════════════════╗
+        ║          ClaudeCord is Online!        ║
+        ║    Powered by Claude 3.5 Sonnet       ║
+        ║    Ready to assist and chat! 🤖✨     ║
+        ╚═══════════════════════════════════════╝
+        """
+        logger.info(ascii_art)
         
         # check if PyNaCl is installed
         try:
@@ -676,10 +708,35 @@ class ClaudeCordBot:
     async def close(self):
         """Cleanup bot resources"""
         try:
+            # Cancel status rotation task
+            if self._status_task:
+                self._status_task.cancel()
+                
+            # Cancel all pending tasks
+            for task in asyncio.all_tasks():
+                if task is not asyncio.current_task():
+                    task.cancel()
+                
+            # Add database connection pool cleanup
+            if hasattr(self, 'db_pool'):
+                await self.db_pool.close()
+                
+            # Add explicit cleanup of message queue
+            if hasattr(self, 'message_queue'):
+                await self.message_queue.stop()
+                
+            # Stop monitoring
             await self.monitoring.stop_monitoring()
+            
+            # Save all contexts
             await self.context_manager.stop()
-            await self.storage.close()  # Add method to properly close DB connections
+            
+            # Close database connections
+            await self.storage.close()
+            
+            # Close Discord connection
             await self.bot.close()
+            
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
             raise
