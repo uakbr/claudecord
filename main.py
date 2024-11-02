@@ -68,19 +68,12 @@ DEFAULT_CONFIG = {
     but accessibly.""".strip()
 }
 
-@dataclass
-class EnvConfig:
-    discord_token: str
-    claude_key: str
-    database_path: str = "conversations.db"
-    backup_path: str = "backups"
-    log_level: str = "INFO"
-    command_prefix: str = ">"
-    admin_role: str = "ClaudeAdmin"
-    mod_role: str = "ClaudeMod"
-
 class ConfigurationError(Exception):
     """Raised when configuration is invalid"""
+    pass
+
+class RateLimitError(Exception):
+    """Raised when rate limits are exceeded"""
     pass
 
 class RateLimiter:
@@ -404,6 +397,8 @@ class ClaudeCordBot:
         self.super_admin = SUPER_ADMIN_ID
         self.openai_client = AsyncOpenAI(api_key=OPENAI_KEY)
         self.streamer = EnhancedMultiProviderStreamer(self.claude_client, self.openai_client)
+        # Add task tracking
+        self._tasks = set()
 
     def is_super_admin(self, user_id: str) -> bool:
         """Check if user is the super admin"""
@@ -593,14 +588,68 @@ class ClaudeCordBot:
                              file=discord.File(bio, 'history.json'))
 
         @self.bot.command(name='help')
-        async def show_help(ctx):
+        async def show_help(ctx, query: Optional[str] = None):
             """Show detailed help information"""
-            embed = Embed(title="ClaudeCord Help", color=0xda7756)
-            embed.add_field(name="Basic Usage", 
-                          value="Mention the bot with your message to chat", 
-                          inline=False)
-            # Add other command descriptions
-            await ctx.send(embed=embed)
+            help_system = EnhancedHelpCommand(self.bot)
+            
+            if not query:
+                # Show main help overview
+                embed = await help_system.create_overview_embed()
+                view = PaginationView()
+                message = await ctx.send(embed=embed, view=view)
+                
+                # Handle pagination
+                current_page = 0
+                embeds = [embed]
+                for category in help_system.categories:
+                    embeds.append(await help_system.create_category_embed(category))
+                    
+                async def update_page(interaction, direction):
+                    nonlocal current_page
+                    if direction == "next":
+                        current_page = (current_page + 1) % len(embeds)
+                    else:
+                        current_page = (current_page - 1) % len(embeds)
+                    await message.edit(embed=embeds[current_page])
+                    await interaction.response.defer()
+                    
+                view.next_page.callback = lambda i: update_page(i, "next")
+                view.prev_page.callback = lambda i: update_page(i, "prev")
+                
+            else:
+                # Search for specific category or command
+                query = query.lower()
+                
+                # Check categories
+                for category in help_system.categories:
+                    if query == category.name.lower():
+                        embed = await help_system.create_category_embed(category)
+                        await ctx.send(embed=embed)
+                        return
+                        
+                # Check commands
+                for category in help_system.categories:
+                    for cmd in category.commands:
+                        if query == cmd['name'].lower():
+                            embed = Embed(
+                                title=f"Command: {cmd['name']}",
+                                description=cmd['description'],
+                                color=0xda7756
+                            )
+                            embed.add_field(
+                                name="Usage",
+                                value=f"`{cmd['usage']}`",
+                                inline=False
+                            )
+                            embed.add_field(
+                                name="Examples",
+                                value="\n".join(f"`{ex}`" for ex in cmd['examples']),
+                                inline=False
+                            )
+                            await ctx.send(embed=embed)
+                            return
+                            
+                await ctx.send(f"No help found for '{query}'. Use `!help` to see all categories and commands.")
 
         @self.bot.command(name='set_system_prompt')
         @self.permissions.requires_permission(PermissionLevel.ADMIN)
@@ -1180,23 +1229,36 @@ class ClaudeCordBot:
             logger.error(f"An error occurred in send_msg: {e}", exc_info=True)
             await msg.channel.send("I'm sorry, I encountered an error while processing your request.")
 
+    def create_task(self, coro, name=None) -> asyncio.Task:
+        """Create and track a new task"""
+        task = asyncio.create_task(coro, name=name)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
     async def _rotate_status(self):
         """Rotate through different status messages"""
         while True:
-            message, activity_type = self.status_messages[self.status_index]
-            activity = Activity(type=activity_type, name=message)
-            await self.bot.change_presence(activity=activity, status=Status.online)
-            
-            self.status_index = (self.status_index + 1) % len(self.status_messages)
-            await asyncio.sleep(60)  # Change status every minute
+            try:
+                message, activity_type = self.status_messages[self.status_index]
+                activity = Activity(type=activity_type, name=message)
+                await self.bot.change_presence(activity=activity, status=Status.online)
+                
+                self.status_index = (self.status_index + 1) % len(self.status_messages)
+                await asyncio.sleep(60)  # Change status every minute
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in status rotation: {e}")
+                await asyncio.sleep(60)  # Wait before retrying
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
         logger.info(f'{self.bot.user} is now running...')
         await self.storage.init()
         
-        # Start status rotation
-        self._status_task = asyncio.create_task(self._rotate_status())
+        # Start status rotation with tracked task
+        self._status_task = self.create_task(self._rotate_status(), "status_rotation")
         
         # Add cool startup message with ASCII art
         ascii_art = """
@@ -1216,23 +1278,30 @@ class ClaudeCordBot:
             logger.warning("PyNaCl is not installed. Voice will NOT be supported.")
 
     @commands.Cog.listener()
-    async def on_message(self, message):
-        """Auto-moderate messages"""
-        if message.author.bot:
-            return
-            
-        # Get server moderation settings
-        settings = await self.storage.get_guild_settings(str(message.guild.id))
-        
-        # Check against filters
-        if settings.get('filter_enabled'):
-            content = message.content.lower()
-            if any(word in content for word in settings.get('filtered_words', [])):
-                await message.delete()
-                await message.channel.send(
-                    f"{message.author.mention} That word is not allowed here!",
-                    delete_after=5
-                )
+    async def on_message(self, message: discord.Message):
+        """Process and monitor all messages"""
+        try:
+            # Skip bot messages
+            if message.author.bot:
+                return
+
+            # Auto-moderation checks
+            if message.guild:  # Only check server messages
+                settings = await self.storage.get_guild_settings(str(message.guild.id))
+                if settings.get('filter_enabled'):
+                    content = message.content.lower()
+                    if any(word in content for word in settings.get('filtered_words', [])):
+                        await message.delete()
+                        await message.channel.send(
+                            f"{message.author.mention} That word is not allowed here!",
+                            delete_after=5
+                        )
+                        return
+
+            # Process message with security checks
+            await self.process_message(message)
+        except Exception as e:
+            logger.error(f"Error processing message: {e}")
 
     @bot.command(name='delete_history')
     async def delete_history(self, ctx):
@@ -1263,41 +1332,40 @@ class ClaudeCordBot:
         """Cleanup bot resources"""
         try:
             # Cancel status rotation task
-            if self._status_task:
+            if self._status_task and not self._status_task.done():
                 self._status_task.cancel()
-                
-            # Cancel all pending tasks
-            for task in asyncio.all_tasks():
-                if task is not asyncio.current_task():
-                    task.cancel()
-                
-            # Add database connection pool cleanup
+                try:
+                    await self._status_task
+                except asyncio.CancelledError:
+                    pass
+
+            # Cancel all tracked tasks
+            remaining_tasks = list(self._tasks)
+            if remaining_tasks:
+                logger.info(f"Cancelling {len(remaining_tasks)} remaining tasks")
+                for task in remaining_tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*remaining_tasks, return_exceptions=True)
+            
+            # Cleanup resources
             if hasattr(self, 'db_pool'):
                 await self.db_pool.close()
-                
-            # Add explicit cleanup of message queue
             if hasattr(self, 'message_queue'):
                 await self.message_queue.stop()
-                
-            # Stop monitoring
             await self.monitoring.stop_monitoring()
-            
-            # Save all contexts
             await self.context_manager.stop()
-            
-            # Close database connections
             await self.storage.close()
-            
-            # Close Discord connection
             await self.bot.close()
             
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
             raise
         finally:
-            # Ensure critical resources are cleaned up
+            # Cancel all pending tasks
             for task in asyncio.all_tasks():
-                task.cancel()
+                if task is not asyncio.current_task():
+                    task.cancel()
 
     @commands.command(name='health')
     @commands.has_permissions(administrator=True)
@@ -1410,20 +1478,12 @@ class ClaudeCordBot:
         
         # Super admin bypass
         if self.is_super_admin(user_id):
-            # Skip all restrictions and rate limits
-            await super().process_message(message)
+            # Process message directly without restrictions
+            await self._process_message({'msg': message, 'content': content})
             return
             
         # Process message normally
-        await super().process_message(message)
-
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        """Monitor all messages for security"""
-        try:
-            await self.process_message(message)
-        except Exception as e:
-            logger.error(f"Error processing message: {e}")
+        await self._process_message({'msg': message, 'content': content})
 
     async def setup_help_command(self):
         """Setup paginated help command with categories"""
