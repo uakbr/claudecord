@@ -47,7 +47,56 @@ THEMES = {
         background=0x2c2f33,
         text=0xffffff
     ),
-    # Complete theme definitions...
+    Theme.LIGHT: ThemeColors(
+        primary=0x5865f2,
+        secondary=0xeb459e,
+        success=0x57f287,
+        error=0xed4245,
+        warning=0xfee75c,
+        info=0x5865f2,
+        background=0xffffff,
+        text=0x2c2f33
+    ),
+    Theme.NORD: ThemeColors(
+        primary=0x88c0d0,
+        secondary=0x81a1c1,
+        success=0xa3be8c,
+        error=0xbf616a,
+        warning=0xebcb8b,
+        info=0x5e81ac,
+        background=0x2e3440,
+        text=0xeceff4
+    ),
+    Theme.SOLARIZED: ThemeColors(
+        primary=0x268bd2,
+        secondary=0x2aa198,
+        success=0x859900,
+        error=0xdc322f,
+        warning=0xb58900,
+        info=0x268bd2,
+        background=0x002b36,
+        text=0x839496
+    ),
+    Theme.DRACULA: ThemeColors(
+        primary=0xbd93f9,
+        secondary=0xff79c6,
+        success=0x50fa7b,
+        error=0xff5555,
+        warning=0xf1fa8c,
+        info=0x8be9fd,
+        background=0x282a36,
+        text=0xf8f8f2
+    ),
+    Theme.MONOKAI: ThemeColors(
+        primary=0xa6e22e,
+        secondary=0xf92672,
+        success=0xa6e22e,
+        error=0xf92672,
+        warning=0xe6db74,
+        info=0x66d9ef,
+        background=0x272822,
+        text=0xf8f8f2
+    )
 }
 
 class ThemeManager:

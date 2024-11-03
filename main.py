@@ -95,7 +95,7 @@ while maintaining a friendly tone. When dealing with technical topics, you expla
 but accessibly.
 """.strip()
 
-CONFIG_PATH = Path("config.yaml")
+CONFIG_PATH = Path("config/config.yaml")
 DEFAULT_CONFIG = {
     "model": "claude-3-sonnet-20240229",  # Updated to latest Sonnet model
     "max_tokens": 4096,

@@ -5,6 +5,7 @@ mkdir -p {config,data,logs,utils,tests}
 
 # Create necessary files
 touch config/__init__.py
+touch config/config.yaml
 touch utils/__init__.py
 touch tests/__init__.py
 touch .env.example
