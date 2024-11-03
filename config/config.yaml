@@ -24,4 +24,28 @@ limits:
   max_conversation_length: 50
   rate_limit: 5  # messages per second
   max_tokens_per_request: 4096
-  max_image_size: 20000000  # 20MB 
+  max_image_size: 20000000  # 20MB
+
+admin:
+  super_admin_ids:
+    - "YOUR_DISCORD_ID_HERE"  # Replace with your Discord ID
+  admin_role: "ClaudeAdmin"
+  mod_role: "ClaudeMod"
+  log_channel: "bot-logs"  # Channel name for logging
+  alert_channel: "bot-alerts"  # Channel for important alerts
+
+server_setup:
+  categories:
+    - Bot Management
+    - Claude Chat
+    - Community
+  default_channels:
+    - welcome
+    - rules
+    - announcements
+    - claude-chat
+    - claude-help
+  welcome_message: |
+    Welcome to our server! 
+    Please read the rules and enjoy your stay!
+  auto_setup: true  # Run setup automatically on join

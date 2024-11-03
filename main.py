@@ -1587,6 +1587,365 @@ class ClaudeCordBot(commands.Cog):
         finally:
             self._tasks.clear()
 
+    async def setup_channels(self, guild):
+        """Create necessary channels if they don't exist"""
+        try:
+            # Get channel names from config
+            log_channel_name = self.config['admin']['log_channel']
+            alert_channel_name = self.config['admin']['alert_channel']
+            
+            # Check for existing channels
+            existing_channels = {channel.name: channel for channel in guild.channels}
+            
+            # Create category if it doesn't exist
+            bot_category = discord.utils.get(guild.categories, name="Bot Management")
+            if not bot_category:
+                bot_category = await guild.create_category(
+                    "Bot Management",
+                    position=0,
+                    reason="Required for bot logging and alerts"
+                )
+                logger.info(f"Created Bot Management category in {guild.name}")
+            
+            # Create log channel if needed
+            if log_channel_name not in existing_channels:
+                log_channel = await guild.create_text_channel(
+                    log_channel_name,
+                    category=bot_category,
+                    topic="Bot logging and monitoring",
+                    reason="Required for bot logging"
+                )
+                logger.info(f"Created {log_channel_name} channel in {guild.name}")
+                
+                # Set up channel permissions
+                await log_channel.set_permissions(guild.default_role, read_messages=False)
+                admin_role = discord.utils.get(guild.roles, name=self.config['admin']['admin_role'])
+                if admin_role:
+                    await log_channel.set_permissions(admin_role, read_messages=True)
+            
+            # Create alert channel if needed
+            if alert_channel_name not in existing_channels:
+                alert_channel = await guild.create_text_channel(
+                    alert_channel_name,
+                    category=bot_category,
+                    topic="Important bot alerts and notifications",
+                    reason="Required for bot alerts"
+                )
+                logger.info(f"Created {alert_channel_name} channel in {guild.name}")
+                
+                # Set up channel permissions
+                await alert_channel.set_permissions(guild.default_role, read_messages=False)
+                admin_role = discord.utils.get(guild.roles, name=self.config['admin']['admin_role'])
+                mod_role = discord.utils.get(guild.roles, name=self.config['admin']['mod_role'])
+                if admin_role:
+                    await alert_channel.set_permissions(admin_role, read_messages=True)
+                if mod_role:
+                    await alert_channel.set_permissions(mod_role, read_messages=True)
+                
+        except discord.Forbidden:
+            logger.error(f"Missing permissions to create channels in {guild.name}")
+        except Exception as e:
+            logger.error(f"Error setting up channels in {guild.name}: {e}")
+
+    # Add this to the on_guild_join event handler
+    @commands.Cog.listener()
+    async def on_guild_join(self, guild):
+        """Set up necessary channels when bot joins a new server"""
+        logger.info(f"Joined new guild: {guild.name}")
+        await self.setup_channels(guild)
+
+    # Add this to the on_ready event handler
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Set up channels for all guilds on bot startup"""
+        logger.info(f'{self.bot.user} is now running...')
+        
+        # Setup channels for all guilds
+        for guild in self.bot.guilds:
+            await self.setup_channels(guild)
+        
+        # Rest of your on_ready code...
+
+    @commands.command(name='setup_channels')
+    @commands.has_permissions(administrator=True)
+    async def setup_channels_command(self, ctx):
+        """Manually trigger channel setup"""
+        await self.setup_channels(ctx.guild)
+        await ctx.send("Channel setup complete!")
+
+    async def setup_server(self, guild):
+        """Complete server setup including roles, channels, and permissions"""
+        try:
+            logger.info(f"Starting complete setup for guild: {guild.name}")
+            
+            # Create roles if they don't exist
+            roles = {
+                self.config['admin']['admin_role']: {
+                    'color': discord.Color.red(),
+                    'permissions': discord.Permissions(
+                        administrator=True,
+                        manage_guild=True,
+                        manage_roles=True,
+                        manage_channels=True,
+                        manage_messages=True,
+                        manage_webhooks=True,
+                        kick_members=True,
+                        ban_members=True,
+                        mention_everyone=True,
+                        view_audit_log=True
+                    ),
+                    'hoist': True,  # Display separately in member list
+                    'mentionable': True
+                },
+                self.config['admin']['mod_role']: {
+                    'color': discord.Color.blue(),
+                    'permissions': discord.Permissions(
+                        manage_messages=True,
+                        kick_members=True,
+                        ban_members=True,
+                        view_audit_log=True,
+                        mute_members=True,
+                        move_members=True,
+                        manage_nicknames=True
+                    ),
+                    'hoist': True,
+                    'mentionable': True
+                },
+                'ClaudeMember': {  # Basic verified member role
+                    'color': discord.Color.green(),
+                    'permissions': discord.Permissions(
+                        send_messages=True,
+                        read_messages=True,
+                        read_message_history=True,
+                        add_reactions=True,
+                        attach_files=True,
+                        embed_links=True,
+                        use_external_emojis=True
+                    ),
+                    'hoist': False,
+                    'mentionable': False
+                }
+            }
+
+            existing_roles = {role.name: role for role in guild.roles}
+            
+            for role_name, role_data in roles.items():
+                if role_name not in existing_roles:
+                    await guild.create_role(
+                        name=role_name,
+                        color=role_data['color'],
+                        permissions=role_data['permissions'],
+                        hoist=role_data['hoist'],
+                        mentionable=role_data['mentionable'],
+                        reason="Initial bot setup"
+                    )
+                    logger.info(f"Created role {role_name} in {guild.name}")
+
+            # Create categories and channels
+            categories = {
+                "Bot Management": {
+                    "position": 0,
+                    "channels": {
+                        self.config['admin']['log_channel']: {
+                            "type": "text",
+                            "topic": "Bot logging and monitoring",
+                            "permissions": {
+                                "default": {
+                                    "read_messages": False,
+                                    "send_messages": False
+                                },
+                                self.config['admin']['admin_role']: {
+                                    "read_messages": True,
+                                    "send_messages": True
+                                }
+                            }
+                        },
+                        self.config['admin']['alert_channel']: {
+                            "type": "text",
+                            "topic": "Important bot alerts and notifications",
+                            "permissions": {
+                                "default": {
+                                    "read_messages": False,
+                                    "send_messages": False
+                                },
+                                self.config['admin']['admin_role']: {
+                                    "read_messages": True,
+                                    "send_messages": True
+                                },
+                                self.config['admin']['mod_role']: {
+                                    "read_messages": True,
+                                    "send_messages": True
+                                }
+                            }
+                        }
+                    }
+                },
+                "Claude Chat": {
+                    "position": 1,
+                    "channels": {
+                        "claude-chat": {
+                            "type": "text",
+                            "topic": "Chat with Claude AI",
+                            "permissions": {
+                                "default": {
+                                    "read_messages": False
+                                },
+                                "ClaudeMember": {
+                                    "read_messages": True,
+                                    "send_messages": True,
+                                    "add_reactions": True,
+                                    "attach_files": True
+                                }
+                            }
+                        },
+                        "claude-help": {
+                            "type": "text",
+                            "topic": "Get help with Claude commands and features",
+                            "permissions": {
+                                "default": {
+                                    "read_messages": True,
+                                    "send_messages": False
+                                },
+                                self.config['admin']['admin_role']: {
+                                    "send_messages": True
+                                }
+                            }
+                        }
+                    }
+                },
+                "Community": {
+                    "position": 2,
+                    "channels": {
+                        "welcome": {
+                            "type": "text",
+                            "topic": "Welcome new members!",
+                            "permissions": {
+                                "default": {
+                                    "read_messages": True,
+                                    "send_messages": False
+                                }
+                            }
+                        },
+                        "rules": {
+                            "type": "text",
+                            "topic": "Server rules and guidelines",
+                            "permissions": {
+                                "default": {
+                                    "read_messages": True,
+                                    "send_messages": False
+                                }
+                            }
+                        },
+                        "announcements": {
+                            "type": "text",
+                            "topic": "Server announcements",
+                            "permissions": {
+                                "default": {
+                                    "read_messages": True,
+                                    "send_messages": False
+                                },
+                                self.config['admin']['admin_role']: {
+                                    "send_messages": True
+                                },
+                                self.config['admin']['mod_role']: {
+                                    "send_messages": True
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            for category_name, category_data in categories.items():
+                # Create or get category
+                category = discord.utils.get(guild.categories, name=category_name)
+                if not category:
+                    category = await guild.create_category(
+                        name=category_name,
+                        position=category_data['position'],
+                        reason="Initial bot setup"
+                    )
+                    logger.info(f"Created category {category_name} in {guild.name}")
+
+                # Create channels in category
+                for channel_name, channel_data in category_data['channels'].items():
+                    if not discord.utils.get(category.channels, name=channel_name):
+                        channel = await guild.create_text_channel(
+                            name=channel_name,
+                            category=category,
+                            topic=channel_data['topic'],
+                            reason="Initial bot setup"
+                        )
+                        
+                        # Set channel permissions
+                        await channel.set_permissions(guild.default_role, 
+                                                   **channel_data['permissions']['default'])
+                        
+                        for role_name, perms in channel_data['permissions'].items():
+                            if role_name != 'default':
+                                role = discord.utils.get(guild.roles, name=role_name)
+                                if role:
+                                    await channel.set_permissions(role, **perms)
+                        
+                        logger.info(f"Created channel {channel_name} in {guild.name}")
+
+            # Set up welcome message
+            welcome_channel = discord.utils.get(guild.channels, name="welcome")
+            if welcome_channel:
+                embed = discord.Embed(
+                    title=f"Welcome to {guild.name}! 👋",
+                    description=(
+                        "This server is powered by Claude AI!\n\n"
+                        "📜 Please read the rules in <#rules>\n"
+                        "🤖 Chat with Claude in <#claude-chat>\n"
+                        "❓ Get help in <#claude-help>\n\n"
+                        "Enjoy your stay!"
+                    ),
+                    color=discord.Color.blue()
+                )
+                await welcome_channel.send(embed=embed)
+
+            # Set up rules
+            rules_channel = discord.utils.get(guild.channels, name="rules")
+            if rules_channel:
+                rules_embed = discord.Embed(
+                    title="Server Rules",
+                    description=(
+                        "1. Be respectful to all members\n"
+                        "2. No spam or self-promotion\n"
+                        "3. Keep conversations family-friendly\n"
+                        "4. Follow Discord's Terms of Service\n"
+                        "5. Listen to moderators\n"
+                        "6. Use channels for their intended purpose\n"
+                        "7. Don't share personal information\n"
+                        "8. Have fun!"
+                    ),
+                    color=discord.Color.red()
+                )
+                await rules_channel.send(embed=rules_embed)
+
+            logger.info(f"Completed server setup for {guild.name}")
+            
+        except discord.Forbidden:
+            logger.error(f"Missing permissions for server setup in {guild.name}")
+        except Exception as e:
+            logger.error(f"Error during server setup for {guild.name}: {e}")
+
+    # Add these to your existing event handlers
+    @commands.Cog.listener()
+    async def on_guild_join(self, guild):
+        """Set up server when bot joins"""
+        logger.info(f"Joined new guild: {guild.name}")
+        await self.setup_server(guild)
+
+    @commands.command(name='setup_server')
+    @commands.has_permissions(administrator=True)
+    async def setup_server_command(self, ctx):
+        """Manually trigger server setup"""
+        await ctx.send("Starting server setup...")
+        await self.setup_server(ctx.guild)
+        await ctx.send("Server setup complete!")
+
 if __name__ == '__main__':
     logger = setup_logging()
     intents = Intents.default()
