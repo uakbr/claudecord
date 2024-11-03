@@ -4,3 +4,9 @@ anthropic
 aiosqlite
 pdfminer.six
 pillow
+pyyaml
+colorlog
+psutil
+python-dateutil
+tenacity
+httpx

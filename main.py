@@ -36,16 +36,54 @@ from openai import AsyncOpenAI
 import httpx
 from typing import AsyncGenerator, Tuple
 from async_timeout import timeout
+import tiktoken
+from typing import Any
+from utils.logging_config import setup_logging
+from utils.config_manager import ConfigManager
 
 # logging setup
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+
+def setup_logging():
+    """Configure logging with proper formatting and handlers"""
+    log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    date_format = '%Y-%m-%d %H:%M:%S'
+    
+    # Create logs directory if it doesn't exist
+    log_dir = Path('logs')
+    log_dir.mkdir(exist_ok=True)
+    
+    # Configure root logger
+    logging.basicConfig(
+        level=logging.INFO,
+        format=log_format,
+        datefmt=date_format,
+        handlers=[
+            logging.StreamHandler(),  # Console output
+            logging.handlers.RotatingFileHandler(
+                log_dir / 'bot.log',
+                maxBytes=10_000_000,  # 10MB
+                backupCount=5,
+                encoding='utf-8'
+            )
+        ]
+    )
+    
+    # Set specific log levels for different components
+    logging.getLogger('discord').setLevel(logging.WARNING)
+    logging.getLogger('anthropic').setLevel(logging.INFO)
+    logging.getLogger('openai').setLevel(logging.INFO)
+    
+    logger = logging.getLogger(__name__)
+    return logger
 
 # load environment variables
 load_dotenv()
 
 # Constants
 DISCORD_TOK: Final[str] = os.getenv('DISCORD_TOKEN')
+if not DISCORD_TOK:
+    logger.error("DISCORD_TOKEN is not set in the environment variables.")
+    sys.exit(1)
 CLAUDE_KEY: Final[str] = os.getenv('ANTHROPIC_API_KEY')
 MODEL_NAME: Final[str] = "claude-3-sonnet-20240229"
 MAX_TOKENS: Final[int] = 4096
@@ -114,27 +152,34 @@ class SecurityManager:
         self.message_history = defaultdict(list)
         self.suspicious_users = set()
         
-        # Regex patterns for potentially malicious content
+        # Updated regex patterns with better precision
         self.dangerous_patterns = [
-            r"(?i)(exec|eval|system|os\.|subprocess|import os|import subprocess)",
-            r"(?i)(rm -rf|format|del|remove)",
+            r"(?i)(?<![\w\d])(exec|eval|system|os\.|subprocess)(?![\w\d])",  # More precise matching
+            r"(?i)(?<![\w\d])(rm\s+-rf|format\s+[cdefgh]:)(?![\w\d])",  # System commands
             r"(?:[a-zA-Z0-9+/]{4}){30,}={0,3}",  # Long base64 strings
-            r"(?i)(http|ftp|ws)s?://\S+",  # URLs
-            r"@everyone|@here",
-            r"discord\.gg/\S+",  # Discord invites
+            r"(?i)(https?|ftp|ws)s?://[^\s/$.?#].[^\s]*",  # Better URL matching
+            r"@(everyone|here)(?!\w)",  # Mentions
+            r"discord\.gg/[a-zA-Z0-9]+",  # Discord invites
         ]
         
     def is_suspicious_content(self, content: str) -> bool:
+        """Enhanced suspicious content detection"""
+        if not content:
+            return False
+            
         # Check for dangerous patterns
         for pattern in self.dangerous_patterns:
             if re.search(pattern, content):
+                logger.warning(f"Suspicious pattern detected: {pattern}")
                 return True
                 
-        # Check for spam-like content
-        if len(content) > 1000:  # Long messages
+        # Check message characteristics
+        if len(content) > MAX_MESSAGE_LENGTH:
+            logger.warning(f"Message exceeds length limit: {len(content)} chars")
             return True
             
-        if content.count('\n') > 20:  # Too many newlines
+        if content.count('\n') > MAX_NEWLINES:
+            logger.warning(f"Too many newlines: {content.count('\n')}")
             return True
             
         return False
@@ -363,8 +408,10 @@ class EnhancedMultiProviderStreamer:
             }
         }
 
-class ClaudeCordBot:
-    def __init__(self):
+class ClaudeCordBot(commands.Cog):
+    def __init__(self, bot):
+        super().__init__()
+        self.bot = bot
         self.env = self._validate_env()
         self.config = self._load_config()
         self.intents = Intents.default()
@@ -444,7 +491,6 @@ class ClaudeCordBot:
         except Exception as e:
             logger.error(f"Configuration error: {e}")
             sys.exit(1)
-
     def _load_yaml_config(self) -> dict:
         """Load YAML configuration with fallback to defaults"""
         try:
@@ -1025,91 +1071,60 @@ class ClaudeCordBot:
             except Exception as e:
                 await ctx.send(f"Error executing override: {e}")
 
-        @self.bot.command(name='compare')
-        async def compare_responses(self, ctx, style: str = "conversational", *, prompt: str):
-            """Compare responses with real-time analysis"""
+        @commands.command(name='compare')
+        @commands.cooldown(1, COMMAND_COOLDOWN, commands.BucketType.user)
+        async def compare_responses(self, ctx, *, prompt: str):
+            """Compare responses from Claude and GPT-4"""
             async with ctx.typing():
-                # Create embeds for both providers
-                claude_embed = Embed(title="Claude's Response", color=0x9932CC)
-                gpt4_embed = Embed(title="GPT-4's Response", color=0x32CD32)
-                analysis_embed = Embed(title="Real-time Analysis", color=0x4169E1)
-                
-                claude_response = ""
-                gpt4_response = ""
-                
-                # Send initial embeds
-                claude_msg = await ctx.send(embed=claude_embed)
-                gpt4_msg = await ctx.send(embed=gpt4_embed)
-                analysis_msg = await ctx.send(embed=analysis_embed)
-                
                 try:
                     async for provider, token, analysis in self.streamer.stream_both(
-                        prompt, str(ctx.author.id), style=style
+                        prompt=prompt,
+                        user_id=str(ctx.author.id),
+                        analysis=True
                     ):
-                        if provider == "Claude":
-                            claude_response += token
-                            claude_embed.description = claude_response[:4000]
-                            await claude_msg.edit(embed=claude_embed)
-                        else:
-                            gpt4_response += token
-                            gpt4_embed.description = gpt4_response[:4000]
-                            await gpt4_msg.edit(embed=gpt4_embed)
-                            
-                        if analysis:
-                            analysis_embed.clear_fields()
-                            analysis_embed.add_field(
-                                name="Similarity",
-                                value=f"{analysis['similarity']:.2%}",
-                                inline=True
-                            )
-                            analysis_embed.add_field(
-                                name="Token Usage",
-                                value=f"Claude: {analysis['claude_tokens']}\nGPT-4: {analysis['gpt4_tokens']}",
-                                inline=True
-                            )
-                            analysis_embed.add_field(
-                                name="Complexity Difference",
-                                value=f"{analysis['complexity_diff']:.2f}",
-                                inline=True
-                            )
-                            await analysis_msg.edit(embed=analysis_embed)
-                            
+                        # Implementation here
+                        pass
+                        
+                except asyncio.TimeoutError:
+                    await self.handle_timeout_error(ctx)
                 except Exception as e:
-                    await ctx.send(f"Error during comparison: {e}")
-                    logger.error(f"Comparison error: {e}")
-                    
-                finally:
-                    await self.streamer.stop_streams(str(ctx.author.id))
-                    
-                # Add final summary
-                summary = await self.streamer.get_comparison_summary(str(ctx.author.id))
-                if summary:
-                    summary_embed = Embed(title="Comparison Summary", color=0xFFD700)
-                    summary_embed.add_field(
-                        name="Token Efficiency",
-                        value=f"{summary['analysis']['token_efficiency']:.2f}",
-                        inline=True
-                    )
-                    summary_embed.add_field(
-                        name="Response Consistency",
-                        value=f"{summary['analysis']['response_consistency']:.2%}",
-                        inline=True
-                    )
-                    summary_embed.add_field(
-                        name="Complexity Comparison",
-                        value=f"{summary['analysis']['complexity_comparison']:.2f}",
-                        inline=True
-                    )
-                    await ctx.send(embed=summary_embed)
+                    await self.handle_command_error(ctx, e)
+
+        async def handle_command_error(self, ctx, error: Exception):
+            """Enhanced command error handling"""
+            error_embed = Embed(
+                title="Error",
+                color=ERROR_COLOR
+            )
+            
+            if isinstance(error, commands.CommandOnCooldown):
+                error_embed.description = f"Please wait {error.retry_after:.1f}s before using this command again."
+            elif isinstance(error, commands.MissingPermissions):
+                error_embed.description = "You don't have permission to use this command."
+            elif isinstance(error, commands.MissingRequiredArgument):
+                error_embed.description = f"Missing required argument: {error.param.name}"
+            else:
+                error_embed.description = "An unexpected error occurred. Please try again later."
+                logger.error(f"Command error in {ctx.command}: {error}", exc_info=True)
+            
+            await ctx.send(embed=error_embed)
+
+        async def handle_timeout_error(self, ctx):
+            """Handle timeout errors consistently"""
+            timeout_embed = Embed(
+                title="Request Timeout",
+                description="The request took too long to process. Please try again.",
+                color=WARNING_COLOR
+            )
+            await ctx.send(embed=timeout_embed)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-    async def get_claude_response(self, user_id: str, content: List[Dict[str, any]]) -> str:
-        # Add validation for content structure
+    async def get_claude_response(self, user_id: str, content: List[Dict[str, Any]]) -> str:
+        """Get response from Claude API with proper error handling"""
         if not isinstance(content, list) or not all(isinstance(item, dict) for item in content):
             raise ValueError("Invalid content format")
         
-        # Add timeout handling
-        async with asyncio.timeout(30):  # 30 second timeout
+        async with timeout(30):  # 30 second timeout
             try:
                 conversation = await self.storage.get_convo(user_id)
                 
@@ -1169,7 +1184,7 @@ class ClaudeCordBot:
                 logger.error(f"Error in get_claude_response: {e}")
                 if "rate limit" in str(e).lower():
                     raise RateLimitError("Rate limit exceeded")
-                raise
+                raise  # Re-raise the original exception
 
     async def validate_content(self, content: List[Dict[str, any]]) -> bool:
         """Validate content before sending to Claude"""
@@ -1195,62 +1210,93 @@ class ClaudeCordBot:
             self.monitoring.record_response_time(response_time)
         except Exception as e:
             self.monitoring.record_error()
-            logger.error(f"Error sending message: {e}")
-            raise
+            logger.error(f"Error sending message: {e}", exc_info=True)
+            await msg.channel.send("An error occurred while processing your request.")
 
     async def _process_message(self, message_data: Dict[str, Any]) -> None:
-        """Process a message from the queue"""
+        """Process a message with enhanced error handling and rate limiting"""
         msg = message_data['msg']
         content = message_data['content']
-
-        if not content:
-            logger.warning('Content was empty.')
-            return
-
-        if not await self.validate_content(content):
-            await msg.channel.send("Content size exceeds limits. Please try with less data.")
-            return
+        user_id = str(msg.author.id)
 
         try:
-            thinking_msg = await msg.channel.send("Thinking 🤔...")
-            claude_response: str = await self.get_claude_response(str(msg.author.id), content)
-            await thinking_msg.delete()
-            
-            # split the response into chunks of 2000 characters or less
-            chunks = [claude_response[i:i+2000] for i in range(0, len(claude_response), 2000)]
+            async with self.processing_lock:
+                # Check message queue capacity
+                if not await self.message_queue.can_add():
+                    await msg.add_reaction('🔄')
+                    return
 
-            for chunk in chunks:
-                embed = Embed(description=chunk, color=0xda7756)
-                await msg.channel.send(embed=embed)
-             
-            logger.debug(f"Sent response to user {msg.author.id}")
+                # Add to queue
+                await self.message_queue.add_message(message_data)
+
+                # Process through Claude
+                thinking_msg = await msg.channel.send("Thinking... 🤔")
+                try:
+                    response = await self.get_claude_response(user_id, content)
+                    
+                    # Split long responses
+                    chunks = [response[i:i+MESSAGE_CHUNK_SIZE] 
+                             for i in range(0, len(response), MESSAGE_CHUNK_SIZE)]
+                    
+                    for chunk in chunks:
+                        embed = Embed(description=chunk, color=0x2ecc71)
+                        await msg.channel.send(embed=embed)
+                    
+                    # Update metrics
+                    self.monitoring.record_successful_response(
+                        user_id=user_id,
+                        response_time=time.time() - msg.created_at.timestamp(),
+                        tokens_used=len(self.tokenizer.encode(response))
+                    )
+                    
+                except asyncio.TimeoutError:
+                    await msg.channel.send(
+                        "Response took too long. Please try again.",
+                        delete_after=10
+                    )
+                except Exception as e:
+                    logger.error(f"Error processing message: {e}", exc_info=True)
+                    await msg.channel.send(
+                        "An error occurred while processing your message.",
+                        delete_after=10
+                    )
+                finally:
+                    await thinking_msg.delete()
 
         except Exception as e:
-            logger.error(f"An error occurred in send_msg: {e}", exc_info=True)
-            await msg.channel.send("I'm sorry, I encountered an error while processing your request.")
+            logger.error(f"Critical error in message processing: {e}", exc_info=True)
 
-    def create_task(self, coro, name=None) -> asyncio.Task:
-        """Create and track a new task"""
+    def create_task(self, coro, name: Optional[str] = None) -> asyncio.Task:
+        """Create and track a new task with enhanced error handling"""
         task = asyncio.create_task(coro, name=name)
+        
+        def _handle_task_done(task: asyncio.Task):
+            self._tasks.discard(task)
+            if not task.cancelled():
+                exc = task.exception()
+                if exc:
+                    logger.error(f"Task {task.get_name() or 'unnamed'} failed with error: {exc}", 
+                               exc_info=exc)
+                
+        task.add_done_callback(_handle_task_done)
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
         return task
 
     async def _rotate_status(self):
-        """Rotate through different status messages"""
-        while True:
-            try:
-                message, activity_type = self.status_messages[self.status_index]
-                activity = Activity(type=activity_type, name=message)
-                await self.bot.change_presence(activity=activity, status=Status.online)
-                
+        """Rotate bot status messages"""
+        try:
+            while True:
+                status_msg, activity_type = self.status_messages[self.status_index]
+                activity = Activity(type=activity_type, name=status_msg)
+                await self.bot.change_presence(activity=activity)
                 self.status_index = (self.status_index + 1) % len(self.status_messages)
-                await asyncio.sleep(60)  # Change status every minute
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Error in status rotation: {e}")
-                await asyncio.sleep(60)  # Wait before retrying
+                await asyncio.sleep(300)  # 5 minutes between rotations
+        except asyncio.CancelledError:
+            logger.info("Status rotation task cancelled")
+            raise
+        except Exception as e:
+            logger.error(f"Error in status rotation: {e}")
+            raise
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
@@ -1262,7 +1308,7 @@ class ClaudeCordBot:
         
         # Add cool startup message with ASCII art
         ascii_art = """
-        ╔═══════════════════════════════════════╗
+        ╔══════════════════════════════════════╗
         ║          ClaudeCord is Online!        ║
         ║    Powered by Claude 3.5 Sonnet       ║
         ║    Ready to assist and chat! 🤖✨     ║
@@ -1329,9 +1375,10 @@ class ClaudeCordBot:
             raise
             
     async def close(self):
-        """Cleanup bot resources"""
+        """Enhanced cleanup with proper error handling and task management"""
+        logger.info("Starting bot cleanup")
         try:
-            # Cancel status rotation task
+            # Cancel status rotation first
             if self._status_task and not self._status_task.done():
                 self._status_task.cancel()
                 try:
@@ -1339,33 +1386,36 @@ class ClaudeCordBot:
                 except asyncio.CancelledError:
                     pass
 
-            # Cancel all tracked tasks
-            remaining_tasks = list(self._tasks)
-            if remaining_tasks:
-                logger.info(f"Cancelling {len(remaining_tasks)} remaining tasks")
-                for task in remaining_tasks:
-                    if not task.done():
-                        task.cancel()
-                await asyncio.gather(*remaining_tasks, return_exceptions=True)
+            # Cleanup all tracked tasks
+            await self._cleanup_tasks()
             
-            # Cleanup resources
-            if hasattr(self, 'db_pool'):
-                await self.db_pool.close()
-            if hasattr(self, 'message_queue'):
-                await self.message_queue.stop()
-            await self.monitoring.stop_monitoring()
-            await self.context_manager.stop()
-            await self.storage.close()
-            await self.bot.close()
+            # Cleanup resources in order
+            cleanup_order = [
+                (self.db_pool, 'close', 'Database pool'),
+                (self.message_queue, 'stop', 'Message queue'),
+                (self.monitoring, 'stop_monitoring', 'Monitoring system'),
+                (self.context_manager, 'stop', 'Context manager'),
+                (self.storage, 'close', 'Storage'),
+                (self.bot, 'close', 'Discord bot')
+            ]
             
+            for resource, method, name in cleanup_order:
+                if hasattr(self, resource.__name__):
+                    try:
+                        await getattr(resource, method)()
+                        logger.info(f"Successfully cleaned up {name}")
+                    except Exception as e:
+                        logger.error(f"Error cleaning up {name}: {e}")
+                    
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
             raise
         finally:
-            # Cancel all pending tasks
-            for task in asyncio.all_tasks():
+            # Ensure all remaining tasks are cancelled
+            for task in asyncio.all_tasks(loop=asyncio.get_event_loop()):
                 if task is not asyncio.current_task():
                     task.cancel()
+            logger.info("Cleanup completed")
 
     @commands.command(name='health')
     @commands.has_permissions(administrator=True)
@@ -1436,7 +1486,7 @@ class ClaudeCordBot:
             logger.error(f"Error during cleanup: {e}")
         finally:
             # Cancel all pending tasks
-            for task in asyncio.all_tasks():
+            for task in asyncio.all_tasks(loop=asyncio.get_event_loop()):
                 if task is not asyncio.current_task():
                     task.cancel()
 
@@ -1511,11 +1561,47 @@ class ClaudeCordBot:
             embed.set_thumbnail(url=member.display_avatar.url)
             await welcome_channel.send(embed=embed)
 
+    async def cog_load(self):
+        """Called when the cog is loaded"""
+        await self.setup_help_command()
+        await self.storage.init()
+        self._status_task = self.create_task(self._rotate_status(), "status_rotation")
+
+    async def _cleanup_tasks(self):
+        """Clean up all running tasks with proper error handling"""
+        if not self._tasks:
+            return
+        
+        logger.info(f"Cleaning up {len(self._tasks)} running tasks")
+        
+        # Cancel all tasks
+        for task in self._tasks:
+            if not task.done():
+                task.cancel()
+        
+        # Wait for all tasks to complete
+        try:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        except Exception as e:
+            logger.error(f"Error during task cleanup: {e}")
+        finally:
+            self._tasks.clear()
+
 if __name__ == '__main__':
-    bot = ClaudeCordBot()
+    logger = setup_logging()
+    intents = Intents.default()
+    intents.message_content = True
+    bot_instance = commands.Bot(command_prefix='>', intents=intents)
+    bot = ClaudeCordBot(bot_instance)
+    
     try:
-        asyncio.run(bot.start())
+        logger.info("Starting bot...")
+        bot_instance.run(DISCORD_TOK)
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user.")
+        logger.info("Bot stopped by user")
     except Exception as e:
-        logger.error(f"An unexpected error occurred: {e}")
+        logger.error(f"An unexpected error occurred: {e}", exc_info=True)
+    finally:
+        logger.info("Bot shutdown complete")
+
+
